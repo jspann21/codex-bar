@@ -154,3 +154,7 @@ assets/            Product screenshots
 - Windows only.
 - The lightweight build depends on the .NET 10 Desktop Runtime.
 - It reports the account-wide weekly Codex pool, not separate model-specific limits.
+
+## License
+
+CodexBar is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). See [LICENSE](LICENSE) for the full license text.
