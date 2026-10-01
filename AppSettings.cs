@@ -10,6 +10,9 @@ internal sealed class AppSettings
 {
     public double Opacity { get; set; } = 0.9;
     public bool AlwaysOnTop { get; set; } = true;
+    public bool ShowInTaskbar { get; set; }
+    public bool ExpandOnHover { get; set; }
+    public bool WindowsStartupInitialized { get; set; }
     public int RefreshSeconds { get; set; } = 15;
     public bool NotifyOnUsageLimitReached { get; set; } = true;
     public string? UsageLimitNotificationEmail { get; set; }
@@ -139,6 +142,15 @@ internal sealed class AppSettings
         {
             return null;
         }
+    }
+
+    // Apply once so a later explicit Off choice is never reset on launch.
+    public bool ApplyStartupDefault(Action enableStartup)
+    {
+        if (WindowsStartupInitialized) return false;
+        enableStartup();
+        WindowsStartupInitialized = true;
+        return true;
     }
 
     public static bool StartsWithWindows

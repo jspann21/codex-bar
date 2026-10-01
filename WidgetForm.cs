@@ -8,10 +8,16 @@ namespace CodexBar;
 
 internal sealed class WidgetForm : Form
 {
-    private const int WmNchittest = 0x0084;
-    private const int HtCaption = 2;
-    private const int WidgetWidth = 286;
+    private const int WidgetWidth = 290;
     private const int WidgetHeight = 100;
+    private const int TitleHeight = 30;
+    private const int ExpandedUsageHeight = 236;
+    private const int DetailsMinimumHeight = 176;
+    private const int ResetRowsTop = 122;
+    private const int ResetRowHeight = 24;
+    private const int DetailsFooterSpace = 28;
+    private static readonly Color NormalBackground = Color.FromArgb(8, 10, 9);
+    private static readonly Color WarningBackground = Color.FromArgb(132, 38, 48);
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
@@ -20,30 +26,61 @@ internal sealed class WidgetForm : Form
     private const double FullAvailabilityUsedPercent = 0.001;
     private static readonly TimeSpan NotificationDeliveryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ResetTimeMatchTolerance = TimeSpan.FromHours(1);
-    private readonly AppSettings settings = AppSettings.Load();
+    private readonly AppSettings settings;
     private readonly CodexAppServerClient liveClient = new();
     private readonly Icon appIcon;
     private readonly NotifyIcon trayIcon;
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly System.Windows.Forms.Timer positionSaveTimer;
+    private readonly System.Windows.Forms.Timer hoverTimer;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private readonly Pen borderPen = new(Color.FromArgb(42, 58, 49));
     private readonly Pen controlPen = new(Color.FromArgb(130, 150, 138), 1.2f);
-    private readonly Font titleFont = new("Segoe UI Semibold", 8.5f);
-    private readonly Font percentFont = new("Segoe UI Semibold", 25f);
-    private readonly Font resetFont = new("Segoe UI", 9f);
-    private readonly Font compactResetFont = new("Segoe UI", 7.5f);
-    private readonly Font denseResetFont = new("Segoe UI", 6.5f);
+    private readonly Font titleFont = new("Segoe UI Semibold", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font percentFont = new("Segoe UI Semibold", 100f / 3, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font resetFont = new("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font compactFont = new("Segoe UI", 13f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font compactPercentFont = new("Segoe UI Semibold", 80f / 3, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font compactLabelFont = new("Segoe UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font expandedPercentFont = new("Segoe UI Semibold", 51f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font expandedValueFont = new("Segoe UI Semibold", 20f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font expandedForecastFont = new("Segoe UI Semibold", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font bodyFont = new("Segoe UI", 15f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font dateFont = new("Segoe UI Semibold", 16f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly SolidBrush dimBrush = new(Color.FromArgb(143, 160, 150));
     private readonly SolidBrush statusOkBrush = new(Color.FromArgb(84, 235, 120));
     private readonly SolidBrush statusOfflineBrush = new(Color.FromArgb(239, 128, 128));
     private readonly SolidBrush textBrush = new(Color.FromArgb(225, 235, 229));
     private readonly SolidBrush trackBrush = new(Color.FromArgb(31, 39, 34));
     private readonly SolidBrush usageBrush = new(Color.FromArgb(46, 220, 112));
+    private readonly SolidBrush countdownBrush = new(Color.FromArgb(46, 220, 112));
     private UsageSnapshot? snapshot;
     private bool liveConnected;
     private string? readError;
     private bool exiting;
+    private bool showResetDetails;
+    private UsagePace? pace;
+    private bool abovePace;
+    private DateTimeOffset? paceReset;
+    private Point? mouseDownScreen;
+    private Point dragOrigin;
+    private bool dragging;
+    private bool controlPress;
+    private bool titlePress;
+    private int firstVisibleExpiration;
+    private bool hoverExpanded;
+    private bool expandOnNextHoverTick;
+    private bool pointerInHoverBody;
+    private bool suppressHoverUntilReentry;
+    // Resizing may fit the larger face inward; retain where the compact face belongs.
+    private Point? compactAnchor;
+
+    // Drawing uses logical pixels so fonts and hit areas scale together with DPI.
+    private float UiScale => DeviceDpi / 96f;
+    private int LogicalWidth => (int)Math.Round(ClientSize.Width / UiScale);
+    private int LogicalHeight => (int)Math.Round(ClientSize.Height / UiScale);
+    private int VisibleExpirationRows => Math.Max(1, (LogicalHeight - ResetRowsTop - DetailsFooterSpace) / ResetRowHeight);
+    private PointF LogicalPoint(Point point) => new(point.X / UiScale, point.Y / UiScale);
 
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("user32.dll")]
@@ -60,15 +97,26 @@ internal sealed class WidgetForm : Form
         int height,
         uint flags);
 
-    public WidgetForm()
+    public WidgetForm(AppSettings? preferences = null)
     {
+        settings = preferences ?? AppSettings.Load();
+        Exception? startupError = null;
+        if (preferences is null)
+        {
+            try
+            {
+                if (settings.ApplyStartupDefault(() => AppSettings.StartsWithWindows = true)) settings.Save();
+            }
+            catch (Exception ex) { startupError = ex; }
+        }
         Text = "CodexBar";
         FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = true;
+        ApplyTaskbarVisibility(true);
         StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
         ClientSize = new Size(WidgetWidth, WidgetHeight);
-        MinimumSize = MaximumSize = Size;
-        BackColor = Color.FromArgb(8, 10, 9);
+        BackColor = NormalBackground;
         DoubleBuffered = true;
         TopMost = settings.AlwaysOnTop;
         Opacity = Math.Clamp(settings.Opacity, 0.5, 1.0);
@@ -90,6 +138,7 @@ internal sealed class WidgetForm : Form
         };
         trayIcon.DoubleClick += (_, _) => ShowWidget();
         ContextMenuStrip = trayIcon.ContextMenuStrip;
+        if (startupError is not null) ReportStartupError(startupError);
 
         refreshTimer = new System.Windows.Forms.Timer
         {
@@ -105,10 +154,19 @@ internal sealed class WidgetForm : Form
             SavePositionNow();
         };
 
+        hoverTimer = new System.Windows.Forms.Timer();
+        hoverTimer.Tick += (_, _) =>
+        {
+            hoverTimer.Stop();
+            if (!Visible) CancelHover();
+            else ProcessHoverTick(IsHoverBody(PointToClient(Cursor.Position)),
+                ContextMenuStrip?.Visible == true);
+        };
+
         Shown += async (_, _) => await RefreshUsageAsync();
         LocationChanged += (_, _) => QueuePositionSave();
         FormClosing += OnFormClosing;
-        MouseDoubleClick += (_, _) => HideToTray();
+        KeyPreview = true;
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -121,12 +179,20 @@ internal sealed class WidgetForm : Form
     {
         base.OnVisibleChanged(e);
         if (Visible) ApplyAlwaysOnTopState();
+        else if (hoverTimer is not null) CancelHover();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        UpdateFaceSize();
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
         var g = e.Graphics;
+        g.ScaleTransform(UiScale, UiScale);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         var titleY = 14f;
@@ -134,51 +200,281 @@ internal sealed class WidgetForm : Form
         var dotY = titleY + (codexHeight - 6f) / 2f;
         var statusBrush = liveConnected ? statusOkBrush : statusOfflineBrush;
         g.FillEllipse(statusBrush, 10, dotY, 6, 6);
-        g.DrawRectangle(borderPen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        g.DrawRectangle(borderPen, 0, 0, LogicalWidth - 1, LogicalHeight - 1);
 
-        g.DrawString("CODEX  ·  WEEKLY LEFT", titleFont, dimBrush, 20, titleY);
+        using var titleFormat = new StringFormat { FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter };
+        var title = showResetDetails ? "CODEX  ·  RESET DETAILS" : OverviewTitle();
+        g.DrawString(title, titleFont, dimBrush,
+            new RectangleF(20, titleY, LogicalWidth - (showResetDetails ? 82 : 108), 18), titleFormat);
         DrawWindowControls(g);
+        if (!showResetDetails)
+        {
+            g.FillEllipse(textBrush, LogicalWidth - 81, 18, 4, 4);
+            g.FillEllipse(dimBrush, LogicalWidth - 71, 18, 4, 4);
+        }
 
         if (snapshot is null)
         {
-            var message = readError ?? "Waiting for Codex usage…";
-            g.DrawString("—%", percentFont, textBrush, 14, 33);
-            g.DrawString(message, resetFont, dimBrush, 104, 46);
-            DrawProgress(g, 0, Color.FromArgb(45, 62, 52));
+            var message = readError ?? "Waiting for usage…";
+            if (showResetDetails || hoverExpanded)
+            {
+                g.DrawString(message, bodyFont, textBrush, 20, 60);
+                g.DrawString("Open Codex and sign in, then refresh.", resetFont, dimBrush, 20, 94);
+                DrawFooter(g);
+            }
+            else
+            {
+                g.DrawString("—%", percentFont, textBrush, 14, 33);
+                g.DrawString(message, compactFont, textBrush, 108, 34);
+                g.DrawString("Open Codex & sign in", compactFont, dimBrush, 108, 50);
+                g.DrawString("Refresh via tray menu", compactFont, dimBrush, 108, 66);
+                DrawProgress(g, 0, Color.FromArgb(45, 62, 52));
+            }
             return;
         }
 
         var remainingPercent = 100 - snapshot.UsedPercent;
-        var color = RemainingColor(remainingPercent);
-        usageBrush.Color = color;
-        g.DrawString($"{remainingPercent:0}%", percentFont, usageBrush, 14, 33);
-
-        DrawResetSchedule(g, snapshot);
-        DrawProgress(g, remainingPercent, color);
+        if (showResetDetails) DrawResetSchedule(g, snapshot);
+        else if (hoverExpanded) DrawExpandedUsage(g, remainingPercent);
+        else DrawUsageOverview(g, remainingPercent);
+        if (showResetDetails) DrawFooter(g);
     }
 
-    protected override void WndProc(ref Message m)
+    protected override void OnMouseEnter(EventArgs e)
     {
-        base.WndProc(ref m);
-        if (m.Msg == WmNchittest && (int)m.Result == 1)
+        base.OnMouseEnter(e);
+        UpdateHoverTarget(IsHoverBody(PointToClient(Cursor.Position)));
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        UpdateHoverTarget(false);
+    }
+
+    private bool IsHoverBody(Point point) => ClientRectangle.Contains(point) && LogicalPoint(point).Y > TitleHeight;
+
+    private void UpdateHoverTarget(bool inBody)
+    {
+        var wasInBody = pointerInHoverBody;
+        pointerInHoverBody = inBody;
+        if (!inBody)
         {
-            var screenPoint = new Point((short)(m.LParam.ToInt64() & 0xffff),
-                (short)((m.LParam.ToInt64() >> 16) & 0xffff));
-            var clientPoint = PointToClient(screenPoint);
-            var overControls = clientPoint.Y <= 30 && clientPoint.X >= Width - 60;
-            if (!overControls) m.Result = HtCaption;
+            suppressHoverUntilReentry = false;
+            if (wasInBody || (hoverExpanded && !hoverTimer.Enabled))
+            {
+                hoverTimer.Stop();
+                if (hoverExpanded) QueueHover(false);
+            }
         }
+        else if (hoverExpanded) hoverTimer.Stop();
+        else if (!wasInBody && !suppressHoverUntilReentry) QueueHover(true);
+    }
+
+    private void QueueHover(bool expand)
+    {
+        hoverTimer.Stop();
+        if (!settings.ExpandOnHover || showResetDetails) return;
+        if (expand && (!pointerInHoverBody || suppressHoverUntilReentry)) return;
+        expandOnNextHoverTick = expand;
+        hoverTimer.Interval = expand ? 350 : 450;
+        hoverTimer.Start();
+    }
+
+    private void ProcessHoverTick(bool pointerInBody, bool menuVisible)
+    {
+        if (!settings.ExpandOnHover || showResetDetails)
+        {
+            CancelHover();
+            return;
+        }
+        // Keep the geometry stable while dragging or choosing a menu item.
+        if (mouseDownScreen is not null || menuVisible)
+        {
+            QueueHover(expandOnNextHoverTick);
+            return;
+        }
+        if (expandOnNextHoverTick && pointerInBody && !suppressHoverUntilReentry) SetHoverExpanded(true);
+        else if (!expandOnNextHoverTick && !pointerInBody) SetHoverExpanded(false);
+    }
+
+    private void SetHoverExpanded(bool expanded)
+    {
+        if (hoverExpanded == expanded) return;
+        if (expanded) compactAnchor = Location;
+        hoverExpanded = expanded;
+        UpdateFaceSize();
+        if (!expanded) compactAnchor = null;
+        Invalidate();
+    }
+
+    private void CancelHover()
+    {
+        hoverTimer.Stop();
+        SetHoverExpanded(false);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && e.Y <= 30 && e.X >= Width - 60)
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        hoverTimer.Stop();
+        var point = LogicalPoint(e.Location);
+        controlPress = point.Y <= TitleHeight && point.X >= LogicalWidth - 60;
+        titlePress = point.Y <= TitleHeight && !controlPress;
+        dragging = false;
+        mouseDownScreen = PointToScreen(e.Location);
+        dragOrigin = Location;
+        Capture = true;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (mouseDownScreen is not { } start)
         {
-            if (e.X >= Width - 30) HideToTray();
-            else Close();
+            UpdateHoverTarget(IsHoverBody(e.Location));
+            var point = LogicalPoint(e.Location);
+            Cursor = point.Y <= TitleHeight && point.X < LogicalWidth - 60 ? Cursors.SizeAll : Cursors.Default;
             return;
         }
-        base.OnMouseDown(e);
+        if (controlPress) return;
+        var current = PointToScreen(e.Location);
+        var threshold = SystemInformation.DragSize;
+        if (!dragging && (Math.Abs(current.X - start.X) > threshold.Width / 2 ||
+            Math.Abs(current.Y - start.Y) > threshold.Height / 2))
+        {
+            suppressHoverUntilReentry = true;
+            if (titlePress && hoverExpanded)
+            {
+                // Keep the title under the pointer when deliberately starting a drag.
+                var titleLocation = Location;
+                CancelHover();
+                Location = KeepVisible(titleLocation);
+                dragOrigin = Location;
+            }
+            dragging = true;
+        }
+        if (dragging)
+        {
+            var previous = Location;
+            Location = KeepVisible(new Point(
+                dragOrigin.X + current.X - start.X, dragOrigin.Y + current.Y - start.Y));
+            if (compactAnchor is { } anchor)
+                compactAnchor = new Point(anchor.X + Location.X - previous.X,
+                    anchor.Y + Location.Y - previous.Y);
+        }
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Left || mouseDownScreen is null) return;
+        var wasDragging = dragging;
+        var wasControl = controlPress;
+        var wasTitle = titlePress;
+        var start = LogicalPoint(PointToClient(mouseDownScreen.Value));
+        var point = LogicalPoint(e.Location);
+        mouseDownScreen = null;
+        dragging = false;
+        Capture = false;
+        pointerInHoverBody = IsHoverBody(e.Location);
+        if (wasDragging)
+        {
+            suppressHoverUntilReentry = true;
+            hoverTimer.Stop();
+        }
+        if (!ClientRectangle.Contains(e.Location) || wasDragging)
+        {
+            if (hoverExpanded) QueueHover(false);
+            return;
+        }
+        if (wasControl)
+        {
+            if (point.Y <= TitleHeight && point.X >= LogicalWidth - 60 &&
+                (start.X >= LogicalWidth - 30) == (point.X >= LogicalWidth - 30))
+                HideToTray();
+            return;
+        }
+        if (wasTitle)
+        {
+            if (hoverExpanded) QueueHover(false);
+            return;
+        }
+        ToggleFace();
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (Capture) return;
+        if (dragging) suppressHoverUntilReentry = true;
+        mouseDownScreen = null;
+        dragging = false;
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Space or Keys.Enter)
+        {
+            ToggleFace();
+            e.Handled = e.SuppressKeyPress = true;
+        }
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        if (!showResetDetails || snapshot is null) return;
+        firstVisibleExpiration = Math.Clamp(firstVisibleExpiration - Math.Sign(e.Delta),
+            0, Math.Max(0, snapshot.ResetExpirations.Count - VisibleExpirationRows));
+        Invalidate();
+    }
+
+    private void ToggleFace()
+    {
+        CancelHover();
+        if (!showResetDetails) compactAnchor = Location;
+        showResetDetails = !showResetDetails;
+        firstVisibleExpiration = 0;
+        UpdateFaceSize();
+        if (!showResetDetails) compactAnchor = null;
+        Invalidate();
+        pointerInHoverBody = IsHoverBody(PointToClient(Cursor.Position));
+        if (!showResetDetails && Visible && pointerInHoverBody)
+            QueueHover(true);
+    }
+
+    private void UpdateFaceSize()
+    {
+        var wantedHeight = showResetDetails
+            ? Math.Max(DetailsMinimumHeight, ResetRowsTop + DetailsFooterSpace +
+                (snapshot?.ResetExpirations.Count ?? 0) * ResetRowHeight)
+            : hoverExpanded ? ExpandedUsageHeight : WidgetHeight;
+        var screen = Screen.FromControl(this).WorkingArea;
+        ClientSize = new Size((int)Math.Round(WidgetWidth * UiScale),
+            Math.Min((int)Math.Round(wantedHeight * UiScale), screen.Height));
+        // Keep a deliberately dragged larger face in place during refreshes.
+        // Only shrinking back to compact restores its separately retained origin.
+        Location = KeepVisible(showResetDetails || hoverExpanded ? Location : compactAnchor ?? Location);
+    }
+
+    private void UpdatePace()
+    {
+        if (snapshot is null) return;
+        if (paceReset != snapshot.ResetsAt) abovePace = false;
+        paceReset = snapshot.ResetsAt;
+        pace = UsagePace.Calculate(snapshot.UsedPercent, snapshot.ResetsAt, snapshot.CapturedAt, abovePace);
+        abovePace = pace?.AbovePace ?? false;
+        var warning = liveConnected && abovePace;
+        BackColor = warning ? WarningBackground : NormalBackground;
+        textBrush.Color = Color.FromArgb(240, 245, 241);
+        dimBrush.Color = warning ? Color.FromArgb(255, 219, 222) : Color.FromArgb(155, 174, 162);
+        controlPen.Color = dimBrush.Color;
+        borderPen.Color = warning ? Color.FromArgb(204, 106, 115) : Color.FromArgb(42, 58, 49);
+        trackBrush.Color = warning ? Color.FromArgb(91, 25, 33) : Color.FromArgb(31, 39, 34);
     }
 
     private async Task RefreshUsageAsync()
@@ -191,6 +487,8 @@ internal sealed class WidgetForm : Form
             snapshot = current;
             liveConnected = true;
             readError = null;
+            UpdatePace();
+            UpdateFaceSize();
             var remainingPercent = 100 - current.UsedPercent;
             var tooltip = $"Codex weekly left: {remainingPercent:0}% · reset {current.ResetsAt.ToLocalTime():ddd h:mm tt}";
             trayIcon.Text = tooltip[..Math.Min(63, tooltip.Length)];
@@ -201,6 +499,7 @@ internal sealed class WidgetForm : Form
         {
             liveConnected = false;
             readError = snapshot is null ? "Usage unavailable" : null;
+            UpdatePace();
             Debug.WriteLine(ex);
             Invalidate();
         }
@@ -215,6 +514,7 @@ internal sealed class WidgetForm : Form
     {
         var menu = new ContextMenuStrip { ShowImageMargin = false };
         menu.Items.Add("Show widget", null, (_, _) => ShowWidget());
+        menu.Items.Add("Switch face", null, (_, _) => ToggleFace());
         menu.Items.Add("Refresh now", null, async (_, _) => await RefreshUsageAsync());
 
         var refreshInterval = new ToolStripMenuItem("Refresh interval");
@@ -257,6 +557,21 @@ internal sealed class WidgetForm : Form
         }
         menu.Items.Add(opacity);
 
+        var hover = new ToolStripMenuItem($"Expand on hover — {(settings.ExpandOnHover ? "On" : "Off")}")
+        {
+            CheckOnClick = true,
+            Checked = settings.ExpandOnHover
+        };
+        hover.CheckedChanged += (_, _) =>
+        {
+            settings.ExpandOnHover = hover.Checked;
+            if (hover.Checked) QueueHover(true);
+            else CancelHover();
+            hover.Text = $"Expand on hover — {(hover.Checked ? "On" : "Off")}";
+            settings.Save();
+        };
+        menu.Items.Add(hover);
+
         var topmost = new ToolStripMenuItem($"Always on top — {(settings.AlwaysOnTop ? "On" : "Off")}")
         {
             CheckOnClick = true,
@@ -271,6 +586,21 @@ internal sealed class WidgetForm : Form
         };
         menu.Items.Add(topmost);
 
+        var taskbar = new ToolStripMenuItem($"Show in taskbar — {(settings.ShowInTaskbar ? "On" : "Off")}")
+        {
+            Name = "showInTaskbar",
+            CheckOnClick = true,
+            Checked = settings.ShowInTaskbar
+        };
+        taskbar.CheckedChanged += (_, _) =>
+        {
+            settings.ShowInTaskbar = taskbar.Checked;
+            ApplyTaskbarVisibility(Visible);
+            taskbar.Text = $"Show in taskbar — {(taskbar.Checked ? "On" : "Off")}";
+            settings.Save();
+        };
+        menu.Items.Add(taskbar);
+
         var startsWithWindows = AppSettings.StartsWithWindows;
         var startup = new ToolStripMenuItem($"Start with Windows — {(startsWithWindows ? "On" : "Off")}")
         {
@@ -279,8 +609,17 @@ internal sealed class WidgetForm : Form
         };
         startup.Click += (_, _) =>
         {
-            try { AppSettings.StartsWithWindows = startup.Checked; }
-            catch { startup.Checked = !startup.Checked; }
+            try
+            {
+                AppSettings.StartsWithWindows = startup.Checked;
+                settings.WindowsStartupInitialized = true;
+                settings.Save();
+            }
+            catch (Exception ex)
+            {
+                startup.Checked = !startup.Checked;
+                ReportStartupError(ex);
+            }
             startup.Text = $"Start with Windows — {(startup.Checked ? "On" : "Off")}";
         };
         menu.Items.Add(startup);
@@ -297,6 +636,14 @@ internal sealed class WidgetForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); });
         return menu;
+    }
+
+    private void ReportStartupError(Exception error)
+    {
+        Debug.WriteLine(error);
+        trayIcon.ShowBalloonTip(4500, "CodexBar",
+            "Could not update Windows startup. Try Start with Windows from the right-click menu.",
+            ToolTipIcon.Warning);
     }
 
     private void ShowNotificationSettings()
@@ -484,46 +831,153 @@ internal sealed class WidgetForm : Form
 
     private void DrawWindowControls(Graphics g)
     {
-        g.DrawLine(controlPen, Width - 48, 17, Width - 40, 17);
-        g.DrawLine(controlPen, Width - 20, 13, Width - 12, 21);
-        g.DrawLine(controlPen, Width - 12, 13, Width - 20, 21);
+        g.DrawLine(controlPen, LogicalWidth - 48, 17, LogicalWidth - 40, 17);
+        g.DrawLine(controlPen, LogicalWidth - 20, 13, LogicalWidth - 12, 21);
+        g.DrawLine(controlPen, LogicalWidth - 12, 13, LogicalWidth - 20, 21);
+    }
+
+    private void DrawUsageOverview(Graphics g, double remaining)
+    {
+        var color = liveConnected && abovePace ? textBrush.Color : RemainingColor(remaining);
+        usageBrush.Color = color;
+        DrawProgress(g, remaining, color);
+
+        var average = pace?.AveragePerDay is { } daily
+            ? daily < 100 ? $"{daily:0.#}%" : $"{daily:0}%" : "—";
+        var forecast = !liveConnected ? "—" : pace?.Exhausted == true ? "0%"
+            : pace?.RemainingAtReset is { } projected ? $"{Math.Clamp(projected, 0, 100):0}%" : "—";
+        using var centered = new StringFormat(StringFormat.GenericTypographic)
+        {
+            Alignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap
+        };
+        var left = (LogicalWidth - 269) / 2f;
+        g.DrawString($"{remaining:0}%", percentFont, usageBrush, new RectangleF(left, 31, 94, 44), centered);
+        g.DrawString(average, compactPercentFont, usageBrush, new RectangleF(left + 93, 34, 77, 34), centered);
+        g.DrawString(forecast, compactPercentFont, usageBrush, new RectangleF(left + 171, 34, 98, 34), centered);
+        g.DrawString("Weekly Left", compactLabelFont, dimBrush, new RectangleF(left, 66, 94, 15), centered);
+        g.DrawString("Day Average", compactLabelFont, dimBrush, new RectangleF(left + 93, 66, 77, 15), centered);
+        g.DrawString("Remaining at Reset", compactLabelFont, dimBrush, new RectangleF(left + 171, 66, 98, 15), centered);
+    }
+
+    private string OverviewTitle()
+    {
+        if (snapshot is null) return "CODEX  ·  WAITING";
+        if (!liveConnected) return $"CODEX  ·  OFFLINE · {snapshot.CapturedAt.ToLocalTime():h:mm tt}";
+        if (pace is null) return "CODEX  ·  RESET UNKNOWN";
+        var countdown = pace.DaysUntilReset >= 1 ? FormatDays(pace.DaysUntilReset)
+            : pace.DaysUntilReset < 1d / 24 ? "<1h" : $"{pace.DaysUntilReset * 24:0.#}h";
+        return $"CODEX  ·  {countdown} until reset";
+    }
+
+    private void DrawFooter(Graphics g)
+    {
+        var more = showResetDetails && snapshot is not null &&
+            snapshot.ResetExpirations.Count > VisibleExpirationRows;
+        var text = more ? "Scroll for more · click for usage · 2/2"
+            : showResetDetails ? "Click for usage · 2/2" : "Click for reset details · 1 / 2";
+        if (showResetDetails && snapshot is not null && !liveConnected)
+            text = $"Offline · read {snapshot.CapturedAt.ToLocalTime():h:mm tt} · {(more ? "scroll · " : "")}2/2";
+        g.DrawString(text, resetFont, dimBrush, 20, LogicalHeight - 24);
+    }
+
+    private void DrawExpandedUsage(Graphics g, double remaining)
+    {
+        var color = liveConnected && abovePace ? textBrush.Color : RemainingColor(remaining);
+        usageBrush.Color = color;
+        g.DrawString($"{remaining:0}%", expandedPercentFont, usageBrush, 16, 36);
+        g.DrawString("of week left", bodyFont, dimBrush, 174, 73);
+        DrawProgress(g, remaining, color);
+
+        g.DrawString("Average / day", bodyFont, dimBrush, 20, 127);
+        g.DrawString("Until reset", bodyFont, dimBrush, 166, 127);
+        var average = pace?.AveragePerDay is { } daily ? $"{daily:0.0}%" : "—";
+        g.DrawString(average, expandedValueFont, usageBrush, 20, 148);
+        g.DrawString(pace is null ? "—" : FormatDays(pace.DaysUntilReset), expandedValueFont, textBrush, 166, 148);
+
+        string forecast;
+        if (!liveConnected) forecast = $"Offline · read {snapshot!.CapturedAt.ToLocalTime():h:mm tt}";
+        else if (pace is null) forecast = "Waiting for a current reset time";
+        else if (pace.Exhausted) forecast = "Weekly capacity exhausted";
+        else if (pace.AveragePerDay is null) forecast = "Estimating · first 6 hours of the cycle";
+        else if (pace.AbovePace) forecast = $"Runs out in ~{FormatDays(pace.DaysOfCapacity!.Value)} at this pace";
+        else if (pace.RemainingAtReset < 0.5) forecast = "Near weekly limit · little headroom";
+        else forecast = $"On track · ~{pace.RemainingAtReset:0}% left at reset";
+        g.DrawString(forecast, expandedForecastFont, textBrush, 20, 183);
+        DrawFooter(g);
+    }
+
+    private static string FormatDays(double days)
+    {
+        if (days < 1d / 24) return "<1 hour";
+        if (days < 1) return $"{days * 24:0.#} hours";
+        return $"{days:0.#} days";
     }
 
     private void DrawResetSchedule(Graphics g, UsageSnapshot usage)
     {
         var reset = usage.ResetsAt.ToLocalTime();
+        g.DrawString("Full Weekly Reset", bodyFont, dimBrush, 20, 44);
+        DrawResetRow(g, $"{reset:ddd'.' MMM d} · {reset:h:mm tt}", ResetTimeLeft(usage.ResetsAt, true), 66);
+        g.DrawString("Banked Reset Expiries", bodyFont, dimBrush, 20, 98);
         if (usage.ResetExpirations.Count == 0)
         {
-            var resetText = reset.Date == DateTimeOffset.Now.Date
-                ? $"Resets today · {reset:h:mm tt}"
-                : $"Resets {reset:ddd, MMM d} · {reset:h:mm tt}";
-            g.DrawString(resetText, resetFont, textBrush, 104, 41);
+            g.DrawString("No banked resets available", bodyFont, textBrush, 20, ResetRowsTop);
             return;
         }
 
-        var lines = new List<string>
+        var visibleRows = VisibleExpirationRows;
+        firstVisibleExpiration = Math.Clamp(firstVisibleExpiration, 0,
+            Math.Max(0, usage.ResetExpirations.Count - visibleRows));
+        for (var i = firstVisibleExpiration;
+             i < Math.Min(usage.ResetExpirations.Count, firstVisibleExpiration + visibleRows); i++)
         {
-            $"Resets {reset:ddd, MMM d} - {reset:h:mm tt}"
-        };
-        lines.AddRange(usage.ResetExpirations.Select(expiration =>
-        {
-            var localExpiration = expiration.ToLocalTime();
-            return $"Reset expires {localExpiration:ddd, MMM d} - {localExpiration:h:mm tt}";
-        }));
-
-        var font = lines.Count <= 3 ? compactResetFont : denseResetFont;
-        var lineHeight = Math.Min(14f, 44f / lines.Count);
-        var y = 31f;
-        foreach (var line in lines)
-        {
-            g.DrawString(line, font, textBrush, 104, y);
-            y += lineHeight;
+            var y = ResetRowsTop + (i - firstVisibleExpiration) * ResetRowHeight;
+            var expiry = usage.ResetExpirations[i].ToLocalTime();
+            DrawResetRow(g, $"{i + 1}. {expiry:ddd'.' MMM d} · {expiry:h:mm tt}",
+                ResetTimeLeft(usage.ResetExpirations[i], false), y);
         }
+    }
+
+    private string ResetTimeLeft(DateTimeOffset target, bool weeklyReset)
+    {
+        if (!liveConnected || snapshot is null) return weeklyReset ? "Offline" : "—";
+        if (weeklyReset) return pace is null ? "Unknown" : FormatDays(pace.DaysUntilReset);
+        var days = (target - snapshot.CapturedAt).TotalDays;
+        if (days <= 0) return "Expired";
+        if (days < 1) return FormatDays(days);
+        var rounded = Math.Round(days, MidpointRounding.AwayFromZero);
+        return rounded == 1 ? "1 day" : $"{rounded:0} days";
+    }
+
+    private void DrawResetRow(Graphics g, string date, string timeLeft, float y)
+    {
+        const int columnGap = 8;
+        using var format = new StringFormat(StringFormat.GenericTypographic)
+        {
+            FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+        var countdownWidth = (float)Math.Ceiling(g.MeasureString(timeLeft, dateFont, int.MaxValue, format).Width);
+        var dateWidth = LogicalWidth - 40 - countdownWidth - columnGap;
+        var measuredDateWidth = g.MeasureString(date, dateFont, int.MaxValue, format).Width;
+        // Keep ordinary rows at their existing font size; fit longer dates without
+        // dropping date/time text or crowding the right-aligned countdown.
+        using var fittedDateFont = new Font(dateFont.FontFamily,
+            dateFont.Size * Math.Min(1, dateWidth / measuredDateWidth), dateFont.Style, GraphicsUnit.Pixel);
+        g.DrawString(date, fittedDateFont, textBrush,
+            new RectangleF(20, y + (dateFont.Height - fittedDateFont.Height) / 2f, dateWidth, 22), format);
+        format.Alignment = StringAlignment.Far;
+        var brush = timeLeft is "Offline" or "Unknown" or "Expired" or "—" ? dimBrush
+            : abovePace ? textBrush : countdownBrush;
+        g.DrawString(timeLeft, dateFont, brush,
+            new RectangleF(LogicalWidth - 20 - countdownWidth, y, countdownWidth, 22), format);
     }
 
     private void DrawProgress(Graphics g, double percent, Color color)
     {
-        var track = new Rectangle(16, Height - 17, Width - 32, 4);
+        var track = hoverExpanded ? new Rectangle(16, 110, WidgetWidth - 32, 6)
+            : new Rectangle(16, WidgetHeight - 17, WidgetWidth - 32, 4);
         g.FillRectangle(trackBrush, track);
         usageBrush.Color = color;
         if (percent > 0) g.FillRectangle(usageBrush, track.X, track.Y,
@@ -673,11 +1127,16 @@ internal sealed class WidgetForm : Form
 
     private void ShowWidget()
     {
-        ShowInTaskbar = true;
+        ApplyTaskbarVisibility(true);
         Show();
         WindowState = FormWindowState.Normal;
         ApplyAlwaysOnTopState();
         Activate();
+    }
+
+    private void ApplyTaskbarVisibility(bool widgetVisible)
+    {
+        ShowInTaskbar = widgetVisible && settings.ShowInTaskbar;
     }
 
     private void ApplyAlwaysOnTopState()
@@ -697,9 +1156,10 @@ internal sealed class WidgetForm : Form
 
     private void HideToTray()
     {
+        CancelHover();
         FlushPositionSave();
         Hide();
-        ShowInTaskbar = false;
+        ApplyTaskbarVisibility(false);
         trayIcon.ShowBalloonTip(1500, "CodexBar", "Still updating in the notification area.", ToolTipIcon.Info);
     }
 
@@ -712,6 +1172,7 @@ internal sealed class WidgetForm : Form
             return;
         }
         refreshTimer.Stop();
+        CancelHover();
         FlushPositionSave();
         trayIcon.Visible = false;
     }
@@ -733,8 +1194,9 @@ internal sealed class WidgetForm : Form
     private void SavePositionNow()
     {
         if (WindowState != FormWindowState.Normal) return;
-        settings.X = Left;
-        settings.Y = Top;
+        var savedLocation = compactAnchor ?? Location;
+        settings.X = savedLocation.X;
+        settings.Y = savedLocation.Y;
         settings.Save();
     }
 
@@ -752,6 +1214,7 @@ internal sealed class WidgetForm : Form
             liveClient.Dispose();
             refreshTimer.Dispose();
             positionSaveTimer.Dispose();
+            hoverTimer.Dispose();
             trayIcon.Dispose();
             appIcon.Dispose();
             borderPen.Dispose();
@@ -759,14 +1222,21 @@ internal sealed class WidgetForm : Form
             titleFont.Dispose();
             percentFont.Dispose();
             resetFont.Dispose();
-            compactResetFont.Dispose();
-            denseResetFont.Dispose();
+            compactFont.Dispose();
+            compactPercentFont.Dispose();
+            compactLabelFont.Dispose();
+            expandedPercentFont.Dispose();
+            expandedValueFont.Dispose();
+            expandedForecastFont.Dispose();
+            bodyFont.Dispose();
+            dateFont.Dispose();
             dimBrush.Dispose();
             statusOkBrush.Dispose();
             statusOfflineBrush.Dispose();
             textBrush.Dispose();
             trackBrush.Dispose();
             usageBrush.Dispose();
+            countdownBrush.Dispose();
             refreshGate.Dispose();
         }
         base.Dispose(disposing);
