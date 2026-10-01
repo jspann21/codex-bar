@@ -4,6 +4,7 @@ All notable changes to CodexBar are documented here.
 
 ## [Unreleased]
 
+- Recovers the visible widget's always-on-top position if its native flag is lost or ordinary windows cover it despite that flag. Checks locally every two seconds without activation, while respecting hiding, Off, dragging, menus, dialogs and other topmost windows.
 - Adds clickable usage and reset-details faces at a shared 290-pixel width. The 290 × 100 usage face shows weekly remaining, daily average and estimated remaining at reset, with centered labels, a reset countdown in the title and a capacity bar below.
 - Calculates average daily usage over the inferred seven-day cycle and estimates capacity remaining at reset or time until exhaustion. Withholds forecasts during the first six hours and marks offline data without a live pace warning.
 - Warns with a muted red background and white text on both faces when the weekly pace predicts exhaustion before reset, with a small buffer to prevent flicker near the limit.

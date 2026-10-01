@@ -33,6 +33,7 @@ internal sealed class WidgetForm : Form
     private readonly System.Windows.Forms.Timer refreshTimer;
     private readonly System.Windows.Forms.Timer positionSaveTimer;
     private readonly System.Windows.Forms.Timer hoverTimer;
+    private readonly System.Windows.Forms.Timer topmostTimer;
     private readonly SemaphoreSlim refreshGate = new(1, 1);
     private readonly Pen borderPen = new(Color.FromArgb(42, 58, 49));
     private readonly Pen controlPen = new(Color.FromArgb(130, 150, 138), 1.2f);
@@ -96,6 +97,33 @@ internal sealed class WidgetForm : Form
         int width,
         int height,
         uint flags);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowStyle(IntPtr windowHandle, int index);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr windowHandle, uint relationship);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect bounds);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr windowHandle, int attribute, out int value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+        public readonly Rectangle Rectangle => Rectangle.FromLTRB(Left, Top, Right, Bottom);
+    }
 
     public WidgetForm(AppSettings? preferences = null)
     {
@@ -162,6 +190,11 @@ internal sealed class WidgetForm : Form
             else ProcessHoverTick(IsHoverBody(PointToClient(Cursor.Position)),
                 ContextMenuStrip?.Visible == true);
         };
+
+        topmostTimer = new System.Windows.Forms.Timer { Interval = 2_000 };
+        topmostTimer.Tick += (_, _) => MaintainAlwaysOnTop(Visible, ContextMenuStrip?.Visible == true,
+            NeedsTopmostRepair, ApplyAlwaysOnTopState);
+        topmostTimer.Start();
 
         Shown += async (_, _) => await RefreshUsageAsync();
         LocationChanged += (_, _) => QueuePositionSave();
@@ -1144,15 +1177,61 @@ internal sealed class WidgetForm : Form
         TopMost = settings.AlwaysOnTop;
         if (!IsHandleCreated) return;
 
-        _ = SetWindowPos(
+        if (!SetWindowPos(
             Handle,
             settings.AlwaysOnTop ? HwndTopMost : HwndNoTopMost,
             0,
             0,
             0,
             0,
-            SwpNoMove | SwpNoSize | SwpNoActivate);
+            SwpNoMove | SwpNoSize | SwpNoActivate))
+            Trace.WriteLine($"CodexBar: could not apply topmost state (Windows error {Marshal.GetLastWin32Error()}).");
     }
+
+    private void MaintainAlwaysOnTop(bool widgetVisible, bool menuVisible, Func<bool> needsRepair, Action apply)
+    {
+        if (!settings.AlwaysOnTop || !widgetVisible || !Enabled || menuVisible ||
+            WindowState != FormWindowState.Normal || mouseDownScreen is not null ||
+            exiting || Disposing || IsDisposed || !IsHandleCreated)
+            return;
+        if (needsRepair()) apply();
+    }
+
+    private bool NeedsTopmostRepair()
+    {
+        // A window on an inactive virtual desktop must not be brought forward.
+        if (IsCloaked(Handle)) return false;
+        const int extendedStyle = -20;
+        const int topmostStyle = 0x00000008;
+        if ((GetWindowStyle(Handle, extendedStyle) & topmostStyle) == 0) return true;
+        if (!GetWindowRect(Handle, out var widgetBounds)) return false;
+
+        // The reported style can remain topmost even when ordinary windows cover
+        // the widget. Check actual order instead of trusting that flag alone.
+        const uint previousWindow = 3;
+        var visited = new HashSet<IntPtr>();
+        for (var window = GetWindow(Handle, previousWindow);
+             window != IntPtr.Zero && visited.Count < 512 && visited.Add(window);
+             window = GetWindow(window, previousWindow))
+        {
+            var visible = IsWindowVisible(window);
+            var topmost = (GetWindowStyle(window, extendedStyle) & topmostStyle) != 0;
+            if (!visible || topmost)
+                continue;
+            if (GetWindowRect(window, out var otherBounds) &&
+                IsOrdinaryOccluder(widgetBounds.Rectangle, otherBounds.Rectangle,
+                    visible, topmost, IsCloaked(window)))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool IsCloaked(IntPtr window) =>
+        DwmGetWindowAttribute(window, 14, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
+
+    private static bool IsOrdinaryOccluder(Rectangle widgetBounds, Rectangle otherBounds,
+        bool visible, bool topmost, bool cloaked) =>
+        visible && !topmost && !cloaked && widgetBounds.IntersectsWith(otherBounds);
 
     private void HideToTray()
     {
@@ -1172,6 +1251,7 @@ internal sealed class WidgetForm : Form
             return;
         }
         refreshTimer.Stop();
+        topmostTimer.Stop();
         CancelHover();
         FlushPositionSave();
         trayIcon.Visible = false;
@@ -1215,6 +1295,7 @@ internal sealed class WidgetForm : Form
             refreshTimer.Dispose();
             positionSaveTimer.Dispose();
             hoverTimer.Dispose();
+            topmostTimer.Dispose();
             trayIcon.Dispose();
             appIcon.Dispose();
             borderPen.Dispose();

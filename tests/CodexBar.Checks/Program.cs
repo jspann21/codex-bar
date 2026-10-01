@@ -1,11 +1,18 @@
 using System.Drawing.Imaging;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using CodexBar;
 
 internal static class Checks
 {
     private static int passed;
     private static readonly DateTimeOffset Now = new(2026, 10, 1, 12, 0, 0, TimeSpan.Zero);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowStyle(IntPtr window, int index);
 
     [STAThread]
     private static void Main(string[] args)
@@ -64,6 +71,9 @@ internal static class Checks
         });
         ((System.Windows.Forms.Timer)Get(form, "refreshTimer")!).Stop();
         ((System.Windows.Forms.Timer)Get(form, "positionSaveTimer")!).Stop();
+        var topmostTimer = (System.Windows.Forms.Timer)Get(form, "topmostTimer")!;
+        Check("Topmost recovery runs independently of usage refresh", topmostTimer.Enabled && topmostTimer.Interval == 2_000);
+        topmostTimer.Stop();
         ((NotifyIcon)Get(form, "trayIcon")!).Visible = false;
         form.CreateControl();
         Check("Taskbar button stays off by default", !form.ShowInTaskbar);
@@ -335,6 +345,61 @@ internal static class Checks
         preferences.ExpandOnHover = false;
         Invoke(form, "CancelHover");
 
+        var recoveryHandle = form.Handle;
+        var repairs = 0;
+        var probes = 0;
+        Func<bool> covered = () => { probes++; return true; };
+        Action recordRepair = () => repairs++;
+        preferences.AlwaysOnTop = true;
+        Invoke(form, "MaintainAlwaysOnTop", false, false, covered, recordRepair);
+        Check("Recovery respects a deliberately hidden widget", probes == 0 && repairs == 0 && !form.Visible);
+        preferences.AlwaysOnTop = false;
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        Check("Recovery respects always-on-top off", probes == 0 && repairs == 0);
+        preferences.AlwaysOnTop = true;
+        Invoke(form, "MaintainAlwaysOnTop", true, true, covered, recordRepair);
+        form.Enabled = false;
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        form.Enabled = true;
+        Set(form, "mouseDownScreen", new Point(100, 100));
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        Set(form, "mouseDownScreen", null!);
+        Set(form, "exiting", true);
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        Set(form, "exiting", false);
+        form.WindowState = FormWindowState.Minimized;
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        form.WindowState = FormWindowState.Normal;
+        Check("Recovery pauses for menus, dialogs, drags, exit and minimization", probes == 0 && repairs == 0);
+        Invoke(form, "MaintainAlwaysOnTop", true, false, (Func<bool>)(() => false), recordRepair);
+        Check("Healthy window order is left alone", repairs == 0);
+        Invoke(form, "MaintainAlwaysOnTop", true, false, covered, recordRepair);
+        Check("Coverage triggers repair even when the topmost preference remains on", probes == 1 && repairs == 1);
+
+        var widgetRect = new Rectangle(100, 100, 290, 100);
+        var overlappingRect = new Rectangle(150, 120, 500, 400);
+        var separateRect = new Rectangle(600, 100, 100, 100);
+        Check("Ordinary overlapping window above needs recovery", Occludes(widgetRect, overlappingRect, true, false, false));
+        Check("Other topmost windows are not fought", !Occludes(widgetRect, overlappingRect, true, true, false));
+        Check("Hidden and inactive-desktop windows are ignored", !Occludes(widgetRect, overlappingRect, false, false, false) &&
+            !Occludes(widgetRect, overlappingRect, true, false, true));
+        Check("Separate and edge-touching windows do not trigger recovery", !Occludes(widgetRect, separateRect, true, false, false) &&
+            !Occludes(widgetRect, new Rectangle(widgetRect.Right, 100, 100, 100), true, false, false));
+
+        form.TopMost = false;
+        Check("Native detector recognizes a lost topmost style", (bool)Invoke(form, "NeedsTopmostRepair")!);
+        var foregroundBeforeRepair = GetForegroundWindow();
+        var boundsBeforeRepair = form.Bounds;
+        Invoke(form, "MaintainAlwaysOnTop", true, false,
+            (Func<bool>)(() => (bool)Invoke(form, "NeedsTopmostRepair")!),
+            (Action)(() => Invoke(form, "ApplyAlwaysOnTopState")));
+        Check("Native repair reapplies actual topmost style", form.TopMost && (GetWindowStyle(recoveryHandle, -20) & 8) != 0);
+        Check("Native repair preserves focus, position, size and hidden state", GetForegroundWindow() == foregroundBeforeRepair &&
+            form.Bounds == boundsBeforeRepair && !form.Visible);
+        preferences.AlwaysOnTop = false;
+        Invoke(form, "ApplyAlwaysOnTopState");
+        Check("Turning always-on-top off removes the native style", !form.TopMost && (GetWindowStyle(recoveryHandle, -20) & 8) == 0);
+
         Check("Missing taskbar setting uses off default", !System.Text.Json.JsonSerializer
             .Deserialize<AppSettings>("{\"AlwaysOnTop\":false}")!.ShowInTaskbar);
         Check("Explicit saved choices override the defaults", System.Text.Json.JsonSerializer.Deserialize<AppSettings>(
@@ -365,6 +430,7 @@ internal static class Checks
         {
             ((System.Windows.Forms.Timer)Get(taskbarOffForm, "refreshTimer")!).Stop();
             ((System.Windows.Forms.Timer)Get(taskbarOffForm, "positionSaveTimer")!).Stop();
+            ((System.Windows.Forms.Timer)Get(taskbarOffForm, "topmostTimer")!).Stop();
             ((NotifyIcon)Get(taskbarOffForm, "trayIcon")!).Visible = false;
             var taskbarOption = taskbarOffForm.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>()
                 .Single(item => item.Name == "showInTaskbar");
@@ -425,6 +491,9 @@ internal static class Checks
     }
 
     private static bool Near(double? value, double expected) => value.HasValue && Math.Abs(value.Value - expected) < 0.00001;
+    private static bool Occludes(Rectangle widget, Rectangle other, bool visible, bool topmost, bool cloaked) =>
+        (bool)typeof(WidgetForm).GetMethod("IsOrdinaryOccluder", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, new object[] { widget, other, visible, topmost, cloaked })!;
     private static void Check(string label, bool success)
     {
         if (!success) throw new InvalidOperationException("FAIL: " + label);
