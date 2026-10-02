@@ -4,15 +4,15 @@
 
 CodexBar itself requires no login, API key, or account setup—it automatically reuses your existing signed-in Codex session. Its main face shows remaining weekly capacity, average daily usage, and an estimated forecast. Click to switch to the reset-details face, with larger dates and times for the next weekly reset and every available banked reset expiry. It stays out of the way as a compact, draggable widget and continues updating from the Windows notification area.
 
-**Usage overview**
+**Usage overview — Crown layout**
 
-![CodexBar showing weekly capacity remaining, daily average and estimated remaining capacity at reset](assets/usage-overview.png)
+![CodexBar showing weekly capacity remaining, daily average, estimated remaining capacity at reset and a yellow reset-announcement crown](assets/usage-overview.png)
 
-**Reset details**
+**Reset details — Bottom layout**
 
-![CodexBar showing the weekly reset and banked reset expiry dates with time remaining](assets/reset-details.png)
+![CodexBar showing weekly and banked reset dates with time remaining, plus a yellow reset-announcement row and Source link](assets/reset-details.png)
 
-These screenshots show the usage and reset-details body. The current build adds a 24-pixel announcement strip above or below it, as described below.
+These examples demonstrate both announcement layouts. Choose **Reset announcements → Crown/Bottom** from the menu; the saved choice applies to both faces.
 
 ## Highlights
 
