@@ -10,6 +10,7 @@ internal sealed class WidgetForm : Form
 {
     private const int WidgetWidth = 290;
     private const int WidgetHeight = 100;
+    private const int AnnouncementHeight = 24;
     private const int TitleHeight = 30;
     private const int ExpandedUsageHeight = 236;
     private const int DetailsMinimumHeight = 176;
@@ -27,7 +28,23 @@ internal sealed class WidgetForm : Form
     private static readonly TimeSpan NotificationDeliveryTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ResetTimeMatchTolerance = TimeSpan.FromHours(1);
     private readonly AppSettings settings;
+    private readonly VisibilityLog? visibilityLog;
+    private string? lastVisibilityState;
+    private bool diagnosticWarningShown;
     private readonly CodexAppServerClient liveClient = new();
+    private readonly ResetAnnouncementClient announcementClient;
+    private readonly CancellationTokenSource announcementCancellation = new();
+    private readonly System.Windows.Forms.Timer announcementTimer;
+    private readonly ToolTip announcementTip = new();
+    private readonly bool isolatedPreferences;
+    private ResetAnnouncements? announcements;
+    private DateTimeOffset? announcementCheckedAt;
+    private bool announcementFailed;
+    private bool announcementRefreshing;
+    private string? lastAnnouncementTip;
+    private Size? regionSize;
+    private bool regionCrown;
+    private float regionScale;
     private readonly Icon appIcon;
     private readonly NotifyIcon trayIcon;
     private readonly System.Windows.Forms.Timer refreshTimer;
@@ -40,6 +57,8 @@ internal sealed class WidgetForm : Form
     private readonly Font titleFont = new("Segoe UI Semibold", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font percentFont = new("Segoe UI Semibold", 100f / 3, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font resetFont = new("Segoe UI", 12f, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font announcementSourceFont = new("Segoe UI", 11f, FontStyle.Underline, GraphicsUnit.Pixel);
+    private readonly SolidBrush announcementBrush = new(Color.FromArgb(255, 220, 70));
     private readonly Font compactFont = new("Segoe UI", 13f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font compactPercentFont = new("Segoe UI Semibold", 80f / 3, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font compactLabelFont = new("Segoe UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
@@ -68,6 +87,7 @@ internal sealed class WidgetForm : Form
     private bool dragging;
     private bool controlPress;
     private bool titlePress;
+    private bool announcementPress;
     private int firstVisibleExpiration;
     private bool hoverExpanded;
     private bool expandOnNextHoverTick;
@@ -79,9 +99,16 @@ internal sealed class WidgetForm : Form
     // Drawing uses logical pixels so fonts and hit areas scale together with DPI.
     private float UiScale => DeviceDpi / 96f;
     private int LogicalWidth => (int)Math.Round(ClientSize.Width / UiScale);
-    private int LogicalHeight => (int)Math.Round(ClientSize.Height / UiScale);
+    private bool CrownAnnouncements => settings.ResetAnnouncementPlacement == AnnouncementPlacement.Crown;
+    private int ContentTop => CrownAnnouncements ? AnnouncementHeight : 0;
+    private int LogicalHeight => (int)Math.Round(ClientSize.Height / UiScale) - AnnouncementHeight;
     private int VisibleExpirationRows => Math.Max(1, (LogicalHeight - ResetRowsTop - DetailsFooterSpace) / ResetRowHeight);
-    private PointF LogicalPoint(Point point) => new(point.X / UiScale, point.Y / UiScale);
+    private PointF LogicalPoint(Point point) => new(point.X / UiScale, point.Y / UiScale - ContentTop);
+    private RectangleF AnnouncementBounds => CrownAnnouncements
+        ? new RectangleF(45, 0, WidgetWidth - 90, AnnouncementHeight)
+        : new RectangleF(12, LogicalHeight, WidgetWidth - 24, AnnouncementHeight);
+    private RectangleF AnnouncementSourceBounds => new(AnnouncementBounds.Right - 50,
+        AnnouncementBounds.Top, 50, AnnouncementHeight);
 
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("user32.dll")]
@@ -125,9 +152,16 @@ internal sealed class WidgetForm : Form
         public readonly Rectangle Rectangle => Rectangle.FromLTRB(Left, Top, Right, Bottom);
     }
 
-    public WidgetForm(AppSettings? preferences = null)
+    public WidgetForm(AppSettings? preferences = null, VisibilityLog? diagnostics = null,
+        ResetAnnouncementClient? resetAnnouncementsClient = null)
     {
+        // Injected preferences keep isolated checks away from the user's log.
+        visibilityLog = diagnostics ?? (preferences is null ? new VisibilityLog() : null);
         settings = preferences ?? AppSettings.Load();
+        isolatedPreferences = preferences is not null;
+        announcementClient = resetAnnouncementsClient ?? new ResetAnnouncementClient();
+        if (!Enum.IsDefined(settings.ResetAnnouncementPlacement))
+            settings.ResetAnnouncementPlacement = AnnouncementPlacement.Bottom;
         Exception? startupError = null;
         if (preferences is null)
         {
@@ -143,7 +177,8 @@ internal sealed class WidgetForm : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96, 96);
-        ClientSize = new Size(WidgetWidth, WidgetHeight);
+        ClientSize = new Size(WidgetWidth, WidgetHeight + AnnouncementHeight);
+        UpdateWidgetRegion();
         BackColor = NormalBackground;
         DoubleBuffered = true;
         TopMost = settings.AlwaysOnTop;
@@ -192,27 +227,127 @@ internal sealed class WidgetForm : Form
         };
 
         topmostTimer = new System.Windows.Forms.Timer { Interval = 2_000 };
-        topmostTimer.Tick += (_, _) => MaintainAlwaysOnTop(Visible, ContextMenuStrip?.Visible == true,
-            NeedsTopmostRepair, ApplyAlwaysOnTopState);
+        topmostTimer.Tick += (_, _) =>
+        {
+            ObserveVisibility("poll");
+            if (visibilityLog?.LastError is not null && !diagnosticWarningShown)
+            {
+                diagnosticWarningShown = true;
+                trayIcon.ShowBalloonTip(4500, "CodexBar",
+                    "Could not save the visibility log. Check access to the local CodexBar settings folder.", ToolTipIcon.Warning);
+            }
+            MaintainAlwaysOnTop(Visible, ContextMenuStrip?.Visible == true, NeedsTopmostRepair, ApplyAlwaysOnTopState);
+        };
         topmostTimer.Start();
 
-        Shown += async (_, _) => await RefreshUsageAsync();
+        announcementTimer = new System.Windows.Forms.Timer { Interval = 300_000 };
+        announcementTimer.Tick += async (_, _) => await RefreshAnnouncementsAsync();
+        if (!isolatedPreferences) announcementTimer.Start();
+        Shown += async (_, _) => await Task.WhenAll(RefreshUsageAsync(), RefreshAnnouncementsAsync());
         LocationChanged += (_, _) => QueuePositionSave();
         FormClosing += OnFormClosing;
         KeyPreview = true;
+        RecordVisibility("session-start", $"build={typeof(WidgetForm).Assembly.ManifestModule.ModuleVersionId}");
     }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        RecordVisibility("handle-created");
         ApplyAlwaysOnTopState();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        RecordVisibility("handle-destroying", $"recreating={RecreatingHandle}");
+        base.OnHandleDestroyed(e);
     }
 
     protected override void OnVisibleChanged(EventArgs e)
     {
         base.OnVisibleChanged(e);
+        RecordVisibility("managed-visibility-changed");
         if (Visible) ApplyAlwaysOnTopState();
         else if (hoverTimer is not null) CancelHover();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        var observed = RecordVisibilityMessage(m.Msg, m.WParam, m.LParam);
+        base.WndProc(ref m);
+        if (observed) ObserveVisibility("after-native-message");
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeWindowPosition
+    {
+        public IntPtr Window, InsertAfter;
+        public int X, Y, Width, Height;
+        public uint Flags;
+    }
+
+    private bool RecordVisibilityMessage(int message, IntPtr wParam, IntPtr lParam)
+    {
+        if (visibilityLog is null) return false;
+        switch (message)
+        {
+            case 0x0018: // WM_SHOWWINDOW, before default processing changes visibility.
+                var reason = lParam.ToInt64() switch
+                {
+                    0 => "ShowWindow/unspecified-caller", 1 => "owner-minimized",
+                    2 => "other-window-maximized", 3 => "owner-restored",
+                    4 => "other-window-restored-or-minimized", _ => "unknown"
+                };
+                RecordVisibility("WM_SHOWWINDOW", $"show={wParam != IntPtr.Zero};reason={reason};rawReason={lParam}");
+                return true;
+            case 0x0047 when lParam != IntPtr.Zero: // WM_WINDOWPOSCHANGED
+                var position = Marshal.PtrToStructure<NativeWindowPosition>(lParam);
+                if ((position.Flags & 0x00C0) == 0) return false; // SWP_SHOWWINDOW | SWP_HIDEWINDOW
+                RecordVisibility("WM_WINDOWPOSCHANGED", $"show={(position.Flags & 0x0040) != 0};hide={(position.Flags & 0x0080) != 0};flags=0x{position.Flags:X}");
+                return true;
+            case 0x0010: // WM_CLOSE
+            case 0x0011: // WM_QUERYENDSESSION
+            case 0x0016: // WM_ENDSESSION
+            case 0x0218: // WM_POWERBROADCAST (numeric sleep/resume status only)
+                RecordVisibility("native-lifecycle-message", $"message=0x{message:X};wParam={wParam};lParam={lParam}");
+                return true;
+            case 0x0112 when (wParam.ToInt64() & 0xFFF0) is 0xF020 or 0xF030 or 0xF060 or 0xF120:
+                RecordVisibility("WM_SYSCOMMAND", $"command=0x{wParam.ToInt64() & 0xFFF0:X}");
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private string VisibilityState()
+    {
+        var handle = IsHandleCreated ? Handle : IntPtr.Zero;
+        var owner = handle != IntPtr.Zero ? GetWindow(handle, 4) : IntPtr.Zero;
+        return $"managedVisible={Visible};windowState={WindowState};enabled={Enabled};exiting={exiting};" +
+            $"alwaysOnTop={settings?.AlwaysOnTop};showInTaskbar={ShowInTaskbar};" +
+            $"bounds={Left},{Top},{Width},{Height};widget=[{NativeVisibilityState(handle)}];owner=[{NativeVisibilityState(owner)}]";
+    }
+
+    private static string NativeVisibilityState(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return "no-handle";
+        var cloak = DwmGetWindowAttribute(handle, 14, out var value, sizeof(int)) == 0 ? value.ToString() : "unavailable";
+        return $"handle={handle};visible={IsWindowVisible(handle)};" +
+            $"minimized={(GetWindowStyle(handle, -16) & 0x20000000) != 0};" +
+            $"topmost={(GetWindowStyle(handle, -20) & 8) != 0};cloaked={cloak}";
+    }
+
+    private void RecordVisibility(string eventName, string detail = "")
+    {
+        if (visibilityLog is not null) visibilityLog.Write(eventName, $"{detail};{VisibilityState()}");
+    }
+
+    private void ObserveVisibility(string source)
+    {
+        if (visibilityLog is null) return;
+        var state = VisibilityState();
+        if (state == lastVisibilityState) return;
+        if (visibilityLog.Write("state-change", $"source={source};{state}")) lastVisibilityState = state;
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -227,13 +362,14 @@ internal sealed class WidgetForm : Form
         var g = e.Graphics;
         g.ScaleTransform(UiScale, UiScale);
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        DrawAnnouncement(g);
+        g.TranslateTransform(0, ContentTop);
 
         var titleY = 14f;
         var codexHeight = g.MeasureString("CODEX", titleFont).Height;
         var dotY = titleY + (codexHeight - 6f) / 2f;
         var statusBrush = liveConnected ? statusOkBrush : statusOfflineBrush;
         g.FillEllipse(statusBrush, 10, dotY, 6, 6);
-        g.DrawRectangle(borderPen, 0, 0, LogicalWidth - 1, LogicalHeight - 1);
 
         using var titleFormat = new StringFormat { FormatFlags = StringFormatFlags.NoWrap,
             Trimming = StringTrimming.EllipsisCharacter };
@@ -283,10 +419,21 @@ internal sealed class WidgetForm : Form
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
+        SetAnnouncementTip(false);
         UpdateHoverTarget(false);
     }
 
-    private bool IsHoverBody(Point point) => ClientRectangle.Contains(point) && LogicalPoint(point).Y > TitleHeight;
+    private bool IsHoverBody(Point point) => IsInsideWidget(point) &&
+        LogicalPoint(point).Y > TitleHeight && LogicalPoint(point).Y < LogicalHeight;
+
+    private bool IsInsideWidget(Point point) => ClientRectangle.Contains(point) &&
+        (Region?.IsVisible(point) ?? true);
+
+    private bool IsAnnouncement(Point point) => IsInsideWidget(point) &&
+        AnnouncementBounds.Contains(point.X / UiScale, point.Y / UiScale);
+
+    private bool IsAnnouncementSource(Point point) => IsAnnouncement(point) &&
+        AnnouncementSourceBounds.Contains(point.X / UiScale, point.Y / UiScale);
 
     private void UpdateHoverTarget(bool inBody)
     {
@@ -351,11 +498,13 @@ internal sealed class WidgetForm : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left || !IsInsideWidget(e.Location)) return;
         hoverTimer.Stop();
         var point = LogicalPoint(e.Location);
-        controlPress = point.Y <= TitleHeight && point.X >= LogicalWidth - 60;
-        titlePress = point.Y <= TitleHeight && !controlPress;
+        announcementPress = IsAnnouncement(e.Location);
+        controlPress = point.Y >= 0 && point.Y <= TitleHeight && point.X >= LogicalWidth - 60;
+        titlePress = CrownAnnouncements && point.Y < 0 ||
+            point.Y >= 0 && point.Y <= TitleHeight && !controlPress;
         dragging = false;
         mouseDownScreen = PointToScreen(e.Location);
         dragOrigin = Location;
@@ -368,8 +517,12 @@ internal sealed class WidgetForm : Form
         if (mouseDownScreen is not { } start)
         {
             UpdateHoverTarget(IsHoverBody(e.Location));
+            SetAnnouncementTip(IsAnnouncement(e.Location));
             var point = LogicalPoint(e.Location);
-            Cursor = point.Y <= TitleHeight && point.X < LogicalWidth - 60 ? Cursors.SizeAll : Cursors.Default;
+            Cursor = IsAnnouncementSource(e.Location) ? Cursors.Hand
+                : CrownAnnouncements && point.Y < 0 ||
+                    point.Y >= 0 && point.Y <= TitleHeight && point.X < LogicalWidth - 60
+                    ? Cursors.SizeAll : Cursors.Default;
             return;
         }
         if (controlPress) return;
@@ -407,6 +560,7 @@ internal sealed class WidgetForm : Form
         var wasDragging = dragging;
         var wasControl = controlPress;
         var wasTitle = titlePress;
+        var wasAnnouncement = announcementPress;
         var start = LogicalPoint(PointToClient(mouseDownScreen.Value));
         var point = LogicalPoint(e.Location);
         mouseDownScreen = null;
@@ -418,16 +572,22 @@ internal sealed class WidgetForm : Form
             suppressHoverUntilReentry = true;
             hoverTimer.Stop();
         }
-        if (!ClientRectangle.Contains(e.Location) || wasDragging)
+        if (!IsInsideWidget(e.Location) || wasDragging)
         {
             if (hoverExpanded) QueueHover(false);
             return;
         }
         if (wasControl)
         {
-            if (point.Y <= TitleHeight && point.X >= LogicalWidth - 60 &&
+            if (point.Y >= 0 && point.Y <= TitleHeight && point.X >= LogicalWidth - 60 &&
                 (start.X >= LogicalWidth - 30) == (point.X >= LogicalWidth - 30))
-                HideToTray();
+                HideToTray(point.X >= LogicalWidth - 30 ? "close-button" : "minimize-button");
+            return;
+        }
+        if (wasAnnouncement)
+        {
+            if (IsAnnouncementSource(e.Location)) OpenAnnouncementSource();
+            if (hoverExpanded) QueueHover(false);
             return;
         }
         if (wasTitle)
@@ -488,10 +648,149 @@ internal sealed class WidgetForm : Form
             : hoverExpanded ? ExpandedUsageHeight : WidgetHeight;
         var screen = Screen.FromControl(this).WorkingArea;
         ClientSize = new Size((int)Math.Round(WidgetWidth * UiScale),
-            Math.Min((int)Math.Round(wantedHeight * UiScale), screen.Height));
+            Math.Min((int)Math.Round((wantedHeight + AnnouncementHeight) * UiScale), screen.Height));
+        UpdateWidgetRegion();
         // Keep a deliberately dragged larger face in place during refreshes.
         // Only shrinking back to compact restores its separately retained origin.
         Location = KeepVisible(showResetDetails || hoverExpanded ? Location : compactAnchor ?? Location);
+    }
+
+    private GraphicsPath WidgetOutline()
+    {
+        var outline = new GraphicsPath();
+        var height = LogicalHeight + AnnouncementHeight;
+        if (CrownAnnouncements)
+            outline.AddPolygon(new PointF[]
+            {
+                new(0, AnnouncementHeight), new(35, AnnouncementHeight), new(45, 0),
+                new(WidgetWidth - 45, 0), new(WidgetWidth - 35, AnnouncementHeight),
+                new(WidgetWidth, AnnouncementHeight), new(WidgetWidth, height), new(0, height)
+            });
+        else outline.AddRectangle(new RectangleF(0, 0, WidgetWidth, height));
+        return outline;
+    }
+
+    private void UpdateWidgetRegion()
+    {
+        if (regionSize == ClientSize && regionCrown == CrownAnnouncements && regionScale == UiScale) return;
+        using var outline = WidgetOutline();
+        using var transform = new Matrix();
+        transform.Scale(UiScale, UiScale);
+        outline.Transform(transform);
+        var previous = Region;
+        Region = CrownAnnouncements ? new Region(outline) : null;
+        previous?.Dispose();
+        regionSize = ClientSize;
+        regionCrown = CrownAnnouncements;
+        regionScale = UiScale;
+    }
+
+    private void ChangeAnnouncementPlacement(AnnouncementPlacement placement)
+    {
+        if (settings.ResetAnnouncementPlacement == placement) return;
+        CancelHover();
+        var oldTop = ContentTop;
+        settings.ResetAnnouncementPlacement = placement;
+        var delta = (int)Math.Round((oldTop - ContentTop) * UiScale);
+        Location = new Point(Left, Top + delta);
+        if (compactAnchor is { } anchor) compactAnchor = new Point(anchor.X, anchor.Y + delta);
+        UpdateFaceSize();
+        pointerInHoverBody = false;
+        Invalidate();
+        if (!isolatedPreferences) settings.Save();
+    }
+
+    private bool AnnouncementStale(DateTimeOffset now) => announcementFailed ||
+        announcementCheckedAt is null || now - announcementCheckedAt > TimeSpan.FromMinutes(10);
+
+    private string AnnouncementText(DateTimeOffset now) => announcements is null
+        ? announcementFailed ? "Reset info offline" : "Checking resets…"
+        : AnnouncementStale(now) ? "Stale · reset info" : announcements.Label(now);
+
+    private bool AnnouncementIsActive(DateTimeOffset now) =>
+        !AnnouncementStale(now) && announcements?.IsActive(now) == true;
+
+    private void DrawAnnouncement(Graphics g)
+    {
+        using var outline = WidgetOutline();
+        // The right/bottom edges are inset to keep their stroke inside the client area.
+        using var border = new Matrix();
+        border.Translate(0.5f, 0.5f);
+        border.Scale((WidgetWidth - 1f) / WidgetWidth,
+            (LogicalHeight + AnnouncementHeight - 1f) / (LogicalHeight + AnnouncementHeight));
+        outline.Transform(border);
+        g.DrawPath(borderPen, outline);
+        var now = DateTimeOffset.Now;
+        var bounds = AnnouncementBounds;
+        var textOffset = CrownAnnouncements ? 3 : 0;
+        var brush = AnnouncementIsActive(now) ? announcementBrush : dimBrush;
+        using var format = new StringFormat { FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Center };
+        g.DrawString(AnnouncementText(now), resetFont, brush,
+            new RectangleF(bounds.Left, bounds.Top + textOffset, bounds.Width - 54, bounds.Height), format);
+        var sourceBounds = AnnouncementSourceBounds;
+        sourceBounds.Offset(0, textOffset);
+        format.Alignment = StringAlignment.Far;
+        g.DrawString("Source ↗", announcementSourceFont, brush, sourceBounds, format);
+        if (!CrownAnnouncements)
+            g.DrawLine(borderPen, 12, LogicalHeight, WidgetWidth - 12, LogicalHeight);
+    }
+
+    private void SetAnnouncementTip(bool show)
+    {
+        var text = show ? "Data from Codex Resets · " + ResetAnnouncementClient.SourceUrl + "\n" +
+            (announcements?.Details(DateTimeOffset.Now) ?? "Checking the independent reset tracker.") +
+            (AnnouncementStale(DateTimeOffset.Now) ? "\nStatus unavailable or stale; check the source." : "") +
+            (announcementCheckedAt is { } checkedAt ? $"\nLast checked {checkedAt.ToLocalTime():h:mm tt}." : "") +
+            "\nClick the source link to open the tracker. Drag the crown or title strip to move." : "";
+        if (text == lastAnnouncementTip) return;
+        lastAnnouncementTip = text;
+        announcementTip.SetToolTip(this, text);
+    }
+
+    private void OpenAnnouncementSource()
+    {
+        try { Process.Start(new ProcessStartInfo(ResetAnnouncementClient.SourceUrl) { UseShellExecute = true }); }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"CodexBar: could not open reset tracker: {ex.GetType().Name}");
+            trayIcon.ShowBalloonTip(3500, "CodexBar", "Could not open codex-resets.com in your browser.", ToolTipIcon.Warning);
+        }
+    }
+
+    private async Task RefreshAnnouncementsAsync()
+    {
+        if (announcementRefreshing || exiting || Disposing || IsDisposed) return;
+        announcementRefreshing = true;
+        announcementTimer.Stop();
+        var nextCheck = TimeSpan.FromMinutes(5);
+        try
+        {
+            var current = await announcementClient.ReadAsync(announcementCancellation.Token);
+            if (exiting || Disposing || IsDisposed) return;
+            announcements = current;
+            announcementCheckedAt = DateTimeOffset.Now;
+            announcementFailed = false;
+        }
+        catch (OperationCanceledException) when (announcementCancellation.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            if (exiting || Disposing || IsDisposed) return;
+            announcementFailed = true;
+            if (ex is AnnouncementReadException { RetryAfter: { } delay } && delay > nextCheck) nextCheck = delay;
+            Trace.WriteLine($"CodexBar: reset announcement read failed: {ex.GetType().Name}");
+        }
+        finally
+        {
+            announcementRefreshing = false;
+            if (!exiting && !Disposing && !IsDisposed)
+            {
+                announcementTimer.Interval = (int)Math.Clamp(nextCheck.TotalMilliseconds, 300_000, int.MaxValue);
+                if (!isolatedPreferences) announcementTimer.Start();
+                SetAnnouncementTip(false);
+                Invalidate();
+            }
+        }
     }
 
     private void UpdatePace()
@@ -548,7 +847,27 @@ internal sealed class WidgetForm : Form
         var menu = new ContextMenuStrip { ShowImageMargin = false };
         menu.Items.Add("Show widget", null, (_, _) => ShowWidget());
         menu.Items.Add("Switch face", null, (_, _) => ToggleFace());
-        menu.Items.Add("Refresh now", null, async (_, _) => await RefreshUsageAsync());
+        menu.Items.Add("Refresh now", null, async (_, _) =>
+            await Task.WhenAll(RefreshUsageAsync(), RefreshAnnouncementsAsync()));
+
+        var announcementLayout = new ToolStripMenuItem("Reset announcements") { Name = "resetAnnouncements" };
+        foreach (var placement in new[] { AnnouncementPlacement.Bottom, AnnouncementPlacement.Crown })
+        {
+            var item = new ToolStripMenuItem(placement == AnnouncementPlacement.Crown ? "Crown" : "Bottom")
+            {
+                Name = placement.ToString(), Checked = settings.ResetAnnouncementPlacement == placement
+            };
+            item.Click += (_, _) =>
+            {
+                ChangeAnnouncementPlacement(placement);
+                foreach (var peer in announcementLayout.DropDownItems.OfType<ToolStripMenuItem>())
+                    peer.Checked = peer == item;
+            };
+            announcementLayout.DropDownItems.Add(item);
+        }
+        announcementLayout.DropDownItems.Add(new ToolStripSeparator());
+        announcementLayout.DropDownItems.Add("Data from Codex Resets ↗", null, (_, _) => OpenAnnouncementSource());
+        menu.Items.Add(announcementLayout);
 
         var refreshInterval = new ToolStripMenuItem("Refresh interval");
         foreach (var option in new[]
@@ -667,7 +986,7 @@ internal sealed class WidgetForm : Form
                 sent ? ToolTipIcon.Info : ToolTipIcon.Warning);
         });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); });
+        menu.Items.Add("Exit", null, (_, _) => { RecordVisibility("exit-request", "tray-menu"); exiting = true; Close(); });
         return menu;
     }
 
@@ -1010,7 +1329,7 @@ internal sealed class WidgetForm : Form
     private void DrawProgress(Graphics g, double percent, Color color)
     {
         var track = hoverExpanded ? new Rectangle(16, 110, WidgetWidth - 32, 6)
-            : new Rectangle(16, WidgetHeight - 17, WidgetWidth - 32, 4);
+            : new Rectangle(16, WidgetHeight - 15, WidgetWidth - 32, 4);
         g.FillRectangle(trackBrush, track);
         usageBrush.Color = color;
         if (percent > 0) g.FillRectangle(usageBrush, track.X, track.Y,
@@ -1160,6 +1479,7 @@ internal sealed class WidgetForm : Form
 
     private void ShowWidget()
     {
+        RecordVisibility("show-request", "tray-or-menu");
         ApplyTaskbarVisibility(true);
         Show();
         WindowState = FormWindowState.Normal;
@@ -1194,7 +1514,11 @@ internal sealed class WidgetForm : Form
             WindowState != FormWindowState.Normal || mouseDownScreen is not null ||
             exiting || Disposing || IsDisposed || !IsHandleCreated)
             return;
-        if (needsRepair()) apply();
+        if (needsRepair())
+        {
+            RecordVisibility("topmost-repair-attempt");
+            apply();
+        }
     }
 
     private bool NeedsTopmostRepair()
@@ -1233,25 +1557,30 @@ internal sealed class WidgetForm : Form
         bool visible, bool topmost, bool cloaked) =>
         visible && !topmost && !cloaked && widgetBounds.IntersectsWith(otherBounds);
 
-    private void HideToTray()
+    private void HideToTray(string reason)
     {
+        RecordVisibility("hide-request", reason);
         CancelHover();
         FlushPositionSave();
         Hide();
+        RecordVisibility("hide-completed", reason);
         ApplyTaskbarVisibility(false);
         trayIcon.ShowBalloonTip(1500, "CodexBar", "Still updating in the notification area.", ToolTipIcon.Info);
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        RecordVisibility("form-closing", $"reason={e.CloseReason};cancel={e.Cancel}");
         if (!exiting)
         {
             e.Cancel = true;
-            HideToTray();
+            HideToTray($"form-closing:{e.CloseReason}");
             return;
         }
         refreshTimer.Stop();
         topmostTimer.Stop();
+        announcementTimer.Stop();
+        announcementCancellation.Cancel();
         CancelHover();
         FlushPositionSave();
         trayIcon.Visible = false;
@@ -1291,6 +1620,11 @@ internal sealed class WidgetForm : Form
     {
         if (disposing)
         {
+            announcementCancellation.Cancel();
+            announcementClient.Dispose();
+            announcementTimer.Dispose();
+            announcementCancellation.Dispose();
+            announcementTip.Dispose();
             liveClient.Dispose();
             refreshTimer.Dispose();
             positionSaveTimer.Dispose();
@@ -1303,6 +1637,8 @@ internal sealed class WidgetForm : Form
             titleFont.Dispose();
             percentFont.Dispose();
             resetFont.Dispose();
+            announcementSourceFont.Dispose();
+            announcementBrush.Dispose();
             compactFont.Dispose();
             compactPercentFont.Dispose();
             compactLabelFont.Dispose();

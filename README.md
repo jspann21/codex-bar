@@ -12,6 +12,8 @@ CodexBar itself requires no login, API key, or account setup—it automatically 
 
 ![CodexBar showing the weekly reset and banked reset expiry dates with time remaining](assets/reset-details.png)
 
+These screenshots show the usage and reset-details body. The current build adds a 24-pixel announcement strip above or below it, as described below.
+
 ## Highlights
 
 - Requires no separate login or API key—automatically reuses your existing Codex authentication
@@ -21,7 +23,8 @@ CodexBar itself requires no login, API key, or account setup—it automatically 
 - Changes from green to amber to red as capacity runs low
 - Warns with a muted red face and white text when average usage predicts running out before reset
 - Switches between usage and reset details with a click; details grow vertically rather than shrinking the text
-- Keeps the main face at 290 × 100 logical pixels, with three prominent percentages, labels below them, reset countdown in the title and the progress bar at the bottom
+- Keeps the main usage body at 290 × 100 logical pixels, with three prominent percentages, labels below them, reset countdown in the title and the progress bar below
+- Adds a 24-pixel reset-announcement strip on both faces, with a saved Crown or Bottom layout and yellow text for announced or possible resets
 - Restores the compact face's position after viewing larger details or hover content, including at screen edges
 - Optionally expands the usage face vertically on hover for larger values and fuller labels, then returns to its compact size when the pointer leaves
 - Refreshes automatically at a configurable interval
@@ -31,15 +34,16 @@ CodexBar itself requires no login, API key, or account setup—it automatically 
 - Can launch automatically when Windows starts
 - Can notify you by email when weekly capacity resets to fully available
 - Actively fetches current limits through Codex's supported local app-server interface
-- Roughly 250 KB as a framework-dependent Windows executable
+- Roughly 300 KB as a framework-dependent Windows executable
 
 ## Using the widget
 
-- **Move:** use the top/title strip as a drag handle. Hovering it never expands the widget, and starting a title-strip drag collapses hover content while keeping the title under the pointer. Existing body dragging is also supported.
+- **Move:** use the title strip or announcement crown as a drag handle. Hovering either never expands the widget, and starting a drag there collapses hover content while keeping the handle under the pointer. Existing body dragging is also supported.
 - **Switch face:** click the body, press Space or Enter while focused, or choose **Switch face** from the tray menu. Title clicks and dragging do not switch faces.
-- **Reset details:** uses a 290-pixel width shared with the main face for readable date and countdown columns. Under **Full Weekly Reset**, the local date/time sits on the left and time remaining on the right. **Banked Reset Expiries** lists numbered date/time rows with matching right-aligned countdowns, without years or duplicate captions. Countdown text is green, or white on the red warning face. Long date rows fit their available space while keeping the countdown aligned to the right. Weekly time keeps decimal days; banked expiry days round to the nearest whole day, with hours shown below one day and expired entries marked explicitly. Countdown values use the latest successful observation; offline banked countdowns show a dash. Two banked resets fit in 290 × 198 logical pixels. Very long lists are limited to the screen height; scroll the face to reach the remaining resets. Offline data is marked in the weekly countdown and last-read footer.
+- **Reset details:** uses a 290-pixel width shared with the main face for readable date and countdown columns. Under **Full Weekly Reset**, the local date/time sits on the left and time remaining on the right. **Banked Reset Expiries** lists numbered date/time rows with matching right-aligned countdowns, without years or duplicate captions. Countdown text is green, or white on the red warning face. Long date rows fit their available space while keeping the countdown aligned to the right. Weekly time keeps decimal days; banked expiry days round to the nearest whole day, with hours shown below one day and expired entries marked explicitly. Countdown values use the latest successful observation; offline banked countdowns show a dash. Two banked resets fit in a 290 × 198 body, or 290 × 222 including the announcement strip. Very long lists are limited to the screen height; scroll the face to reach the remaining resets. Offline data is marked in the weekly countdown and last-read footer.
 - **Main face:** the large **Weekly Left** percentage sits beside **Day Average** and **Remaining at Reset** percentages at 80% of its font size. All three share the weekly capacity color and have centered labels below them; the title says how long **until reset**. When above pace, the red face uses white percentages and shows **0% Remaining at Reset**. Hover content includes the estimated time until exhaustion, and the reset-details face expands separately for readable dates.
-- **Hover expansion:** enable **Expand on hover** from the right-click menu. Body entry waits 350 ms before expanding to 290 × 236; leaving the body (including moving to the title strip) waits 450 ms before collapsing. Body reentry cancels collapse. Open menus postpone changes. Title-strip dragging shrinks immediately once movement crosses the drag threshold; hover expansion stays suppressed after release until the pointer leaves and reenters the body. This option starts off and persists between launches.
+- **Hover expansion:** enable **Expand on hover** from the right-click menu. Body entry waits 350 ms before expanding to 290 × 260 including the announcement strip; leaving the body (including moving to the title or announcement strip) waits 450 ms before collapsing to 290 × 124. Body reentry cancels collapse. Open menus postpone changes. Title-strip or crown dragging shrinks immediately once movement crosses the drag threshold; hover expansion stays suppressed after release until the pointer leaves and reenters the body. This option starts off and persists between launches.
+- **Reset announcements:** choose **Reset announcements → Bottom/Crown** from the menu; Bottom is the default and the choice applies to both faces. Either layout adds a fixed 24 pixels, so the compact widget is 290 × 124. The crown has a shaped outline with empty corners. Switching layouts preserves the title's screen position where screen bounds allow. Announced and possible resets use yellow text even on the red usage-warning face. Click the underlined **Source ↗** link to open Codex Resets; hovering the strip shows details and the last successful check. Clicking other strip text does not switch faces.
 - **Position:** larger faces fit inward when near a screen edge, then return to the compact face's original location. Body dragging moves that saved location by the same distance. Title-strip dragging collapses under the pointer and sets the new compact position directly. The saved startup position is the compact location.
 - **Taskbar:** choose **Show in taskbar — On/Off** from the right-click menu. Off hides the running-window button while leaving the widget visible. The choice persists and applies when restoring the widget from the tray. New or missing settings default to Off; an explicit saved choice is retained. The notification icon and pinned launch shortcut remain available; a pinned shortcut remains visible as a launcher.
 - **Always on top:** while enabled and the widget is visible, a local check every two seconds repairs a lost topmost flag or an ordinary window covering it. Recovery preserves position, size and keyboard focus. It pauses during dragging, menus, modal dialogs and minimization, respects deliberate hiding and Off, and ignores other topmost windows and windows on inactive virtual desktops. This check makes no Codex requests.
@@ -73,12 +77,13 @@ Preferences persist between launches.
 | Refresh interval | 5 sec, 15 sec, 30 sec, 1 min, 5 min | 15 sec | Controls how often CodexBar requests the current live account limit. |
 | Transparency | 100%, 90%, 80%, 70%, 60%, 50% opaque | 90% | Adjusts the entire widget's opacity. |
 | Expand on hover | On / Off | Off | Expands the usage face vertically for larger labels while hovered. |
+| Reset announcements | Bottom / Crown | Bottom | Places the independent tracker's status on both faces; the crown also supports dragging. |
 | Always on top | On / Off | On | Keeps the widget above ordinary windows. |
 | Show in taskbar | On / Off | Off | Shows or hides the running-window taskbar button while the widget is visible. |
 | Start with Windows | On / Off | On at first launch | Adds or removes CodexBar from the current user's startup applications; a later Off choice is retained. |
 | Usage notifications | SMTP | On, unconfigured | Sends one alert when observed weekly usage returns to zero and SMTP is configured. |
 | Send test alert | — | — | Exercises the configured notification delivery without changing reset tracking. |
-| Refresh now | — | — | Requests the current live account limit immediately. |
+| Refresh now | — | — | Requests the current account limit and reset-announcement status immediately, respecting tracker retry delays. |
 
 Preferences are stored at:
 
@@ -105,6 +110,14 @@ CodexBar uses the authenticated Codex installation already on your computer:
 5. Displays `100 − used_percent`, the weekly reset, and any available banked-reset expirations in your local time zone.
 
 This means CodexBar does not scrape the UI, automate a browser, read authentication tokens directly, or maintain a second login. The default refresh interval is 15 seconds, but you can change it from **Refresh interval** in the tray menu. Each selected interval performs a real authenticated rate-limit read—for example, selecting 5 seconds sends one read every 5 seconds, while selecting 5 minutes sends one every 5 minutes. If a request fails, the widget clearly labels the last successful live value as **Offline** while it retries.
+
+### Independent reset announcements
+
+Announcement data comes from [Codex Resets](https://codex-resets.com/), an independent tracker, using its free [public API](https://codex-resets.com/api/docs). CodexBar checks `GET /api/v1/status` on launch and every five minutes, independently of the account refresh interval. It uses conditional requests when an ETag is available, respects server retry delays and cancels requests on exit. No account information or Codex credentials are sent to the tracker.
+
+**Reset Announced** means the tracker reports an explicit announcement; the approximate countdown comes from its reported time. If that time passes, the label changes to **Reset Announced · pending**, rather than assuming a reset happened. A banked credit announcement is identified in the tooltip. **Possible reset** is the tracker's AI-classified forecast, with an estimated probability when supplied; it is not an official OpenAI commitment. Expired forecasts disappear. **No reset announced** means no active announcement or forecast is reported. Failures show **Reset info offline**, or **Stale · reset info** if previously retrieved data exists; data also becomes stale after ten minutes without a successful check.
+
+These reports do not change your weekly countdown, usage forecast, warning colour or banked credits. Those continue to come from your actual account limits. The source credit and link appear in both layouts.
 
 ## Privacy and security
 
@@ -164,6 +177,10 @@ Choose **Refresh now** to request the live limit immediately. If the widget says
 
 Look for the CodexBar icon in the notification area, including the overflow menu, and double-click it. Only **Exit** fully closes the application.
 
+This build records visibility diagnostics locally at `%LOCALAPPDATA%\CodexBar\visibility.log`, keeping one older file named `visibility.log.previous`. Each file is limited to approximately 256 KB. If the widget unexpectedly disappears, note the time and preserve both files soon afterward; restoring the widget from the tray is fine.
+
+The log records timestamps, build/session identifiers, explicit minimize/close/show requests, Windows visibility messages, and the widget's window state, bounds and hidden owner state. A two-second local check records state changes even while the widget is hidden. It does not include account data, credentials, other apps' contents or screenshots, and nothing is uploaded automatically. A tray warning reports a log write failure. Logging begins when this build is launched; it cannot reconstruct earlier incidents. Windows does not always identify who requested a visibility change, so these records provide evidence for investigation rather than a guaranteed diagnosis.
+
 ### The lightweight EXE asks for .NET
 
 Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0), or rebuild/download the portable version.
@@ -174,6 +191,8 @@ Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/en-us/downloa
 CodexBar.csproj    Windows Forms project configuration
 WidgetForm.cs      Widget UI, tray menu, rendering, and refresh behavior
 UsagePace.cs       Weekly-cycle average and forecast calculation
+VisibilityLog.cs   Rotating local visibility diagnostics
+ResetAnnouncements.cs  Independent reset status, validation and HTTP client
 CodexAppServerClient.cs  Live authenticated Codex rate-limit client
 AppSettings.cs     Persistent preferences and Windows startup setting
 build.ps1          Lightweight and portable publishing script
@@ -197,6 +216,8 @@ dotnet run --project tests/CodexBar.Checks -c Release -- artifacts/preview-check
 ```
 
 The checks render sample faces to the optional output folder. They do not contact Codex, send notifications, or save preferences. Confirm the live executable's click, drag, tray controls and appearance separately after building.
+
+Announcement checks use isolated HTTP fixtures by default. To additionally make one read-only request to the live public tracker through the actual client, append `--live-reset-check` after the output path.
 
 ## License
 

@@ -4,6 +4,10 @@ All notable changes to CodexBar are documented here.
 
 ## [Unreleased]
 
+- Adds Codex Resets announcement data on both faces with a saved Crown or Bottom menu choice. Both layouts add 24 pixels while retaining the 290-pixel width; the shaped crown and title strip support dragging without hover expansion. Announced and possible reset text is yellow, with an underlined Source link and tracker credit/details in the tooltip and menu.
+- Clarifies the countdown as "Reset Announced in ~8h", lowers crown text by three logical pixels and gives compact percentage labels two more pixels of space above the progress bar.
+- Reads the independent tracker's public status API every five minutes using conditional requests, bounded requests and server retry delays. Distinguishes scheduled announcements, speculative/expired forecasts, no announcement and stale/offline data; passed scheduled times await confirmation. Account usage, forecasts and reset-credit values remain independent.
+- Adds rotating local visibility diagnostics for unexpected disappearances, including explicit hide/show requests, Windows messages and widget/owner state changes. Records locally without account data or automatic uploads and reports log write failures.
 - Recovers the visible widget's always-on-top position if its native flag is lost or ordinary windows cover it despite that flag. Checks locally every two seconds without activation, while respecting hiding, Off, dragging, menus, dialogs and other topmost windows.
 - Adds clickable usage and reset-details faces at a shared 290-pixel width. The 290 × 100 usage face shows weekly remaining, daily average and estimated remaining at reset, with centered labels, a reset countdown in the title and a capacity bar below.
 - Calculates average daily usage over the inferred seven-day cycle and estimates capacity remaining at reset or time until exhaustion. Withholds forecasts during the first six hours and marks offline data without a live pace warning.

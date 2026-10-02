@@ -8,6 +8,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../UsagePace.cs" Link="UsagePace.cs" />
+    <Compile Include="../../VisibilityLog.cs" Link="VisibilityLog.cs" />
+    <Compile Include="../../ResetAnnouncements.cs" Link="ResetAnnouncements.cs" />
     <Compile Include="../../WidgetForm.cs" Link="WidgetForm.cs" />
     <Compile Include="../../AppSettings.cs" Link="AppSettings.cs" />
     <Compile Include="../../CodexAppServerClient.cs" Link="CodexAppServerClient.cs" />
